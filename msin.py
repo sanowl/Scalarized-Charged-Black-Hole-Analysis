@@ -1,5 +1,5 @@
 import numpy as np
-from scipy.integrate import odeint
+from scipy.integrate import solve_ivp
 from scipy.optimize import root_scalar
 import matplotlib.pyplot as plt
 
@@ -12,25 +12,27 @@ class ScalarizedChargedBlackHole:
         self.m = m
         self.q = q
         
-    def equations(self, y, r):
+    def equations(self, r, y):
         f, chi, phi, psi = y
-        dfdx = (1/r - r*psi**2/2 - r*np.exp(chi)*phi**2/2 - r*self.W(psi**2)/2 - f/r)
-        dchidx = -r*np.exp(chi)*psi**2*phi**2/f - r*psi**2
-        dphidx = -2*phi/r + self.q**2*psi**2*phi/(2*f)
-        dpsidx = -(f + r*f.diff(r))/f*psi - (self.q**2*np.exp(chi)*phi**2/f**2 - self.w(psi**2)/f)*psi
+        if f == 0:
+            f = 1e-10  # Avoid division by zero
+        dfdx = 1 - f + r * f * psi**2 + r * np.exp(chi) * phi**2 + r * f * self.W(psi**2)
+        dchidx = r * (psi**2 + np.exp(chi) * phi**2 / f)
+        dphidx = -2 * phi / r + self.q**2 * psi**2 * phi / f
+        dpsidx = -(f + r * np.gradient(f)) * psi / f - (self.q**2 * np.exp(chi) * phi**2 / f - self.w(psi**2)) * psi / f
         return [dfdx, dchidx, dphidx, dpsidx]
     
     def W(self, x):
-        return self.m**2 * self.c**2 * np.log(1 + x/(2*self.c**2))
+        return self.m**2 * self.c**2 * np.log(1 + x / (2 * self.c**2))
     
     def w(self, x):
-        return self.m**2 / (1 + x/(2*self.c**2))
+        return self.m**2 / (1 + x / (2 * self.c**2))
     
     def solve(self, r_max):
         r = np.linspace(self.rh, r_max, 1000)
-        y0 = [0, 0, 0, self.psi0]
-        solution = odeint(self.equations, y0, r)
-        return r, solution
+        y0 = [1 - 1e-10, 1e-10, self.phi1, self.psi0]
+        solution = solve_ivp(self.equations, (self.rh, r_max), y0, t_eval=r, method='RK45', rtol=1e-8, atol=1e-8)
+        return solution.t, solution.y.T
     
     def mass_and_charge(self, solution, r_max):
         f = solution[-1, 0]
@@ -41,7 +43,7 @@ class ScalarizedChargedBlackHole:
     
     def temperature(self, solution):
         f_prime = (solution[1, 0] - solution[0, 0]) / (self.rh * 1e-6)
-        return f_prime * np.exp(-solution[0, 1]/2) / (4*np.pi)
+        return f_prime * np.exp(-solution[0, 1] / 2) / (4 * np.pi)
     
     def chemical_potential(self, solution, r_max):
         phi = solution[-1, 2]
@@ -54,8 +56,8 @@ def find_scalarized_solution(bh, r_max, target_mass, target_charge):
         r, solution = bh.solve(r_max)
         M, Q = bh.mass_and_charge(solution, r_max)
         return (M - target_mass)**2 + (Q - target_charge)**2
-    
-    result = root_scalar(objective, bracket=[0, 1], method='brentq')
+
+    result = root_scalar(objective, bracket=[0.1, 1], method='brentq')
     return result.root
 
 def analyze_stability(bh, r_max):
@@ -65,8 +67,8 @@ def analyze_stability(bh, r_max):
     mu = bh.chemical_potential(solution, r_max)
     
     # Compute free energies
-    F = M - T * (4*np.pi*bh.rh**2)  # Helmholtz free energy
-    G = M - T * (4*np.pi*bh.rh**2) - mu * Q  # Gibbs free energy
+    F = M - T * (4 * np.pi * bh.rh**2)  # Helmholtz free energy
+    G = M - T * (4 * np.pi * bh.rh**2) - mu * Q  # Gibbs free energy
     
     return M, Q, T, mu, F, G
 
@@ -74,17 +76,17 @@ def compute_qnms(bh, r_max, l, n_max):
     def V_eff(r):
         f = np.interp(r, bh.r, bh.solution[:, 0])
         chi = np.interp(r, bh.r, bh.solution[:, 1])
-        return l*(l+1)/(r**2) * f * np.exp(-chi) + f/(2*r) * (f.diff(r) * np.exp(-chi/2)).diff(r)
+        return l * (l + 1) / (r**2) * f * np.exp(-chi) + f / (2 * r) * (np.gradient(f) * np.exp(-chi / 2)).diff(r)
     
     def wkb_frequencies(n):
-        r0 = root_scalar(lambda r: V_eff(r).diff(r), bracket=[bh.rh, r_max]).root
+        r0 = root_scalar(lambda r: np.gradient(V_eff(r)), bracket=[bh.rh, r_max]).root
         V0 = V_eff(r0)
-        V2 = V_eff(r0).diff(r, 2)
-        V3 = V_eff(r0).diff(r, 3)
+        V2 = np.gradient(np.gradient(V_eff(r0)))
+        V3 = np.gradient(np.gradient(np.gradient(V_eff(r0))))
         
         L = n + 0.5
-        omega = np.sqrt(V0) - 1j*(n+0.5)*np.sqrt(-V2/(2*V0))
-        omega += 1/(8*V0) * ((1/4 + alpha**2)*V2**2/V0**2 - V3/(2*V0))
+        omega = np.sqrt(V0) - 1j * (n + 0.5) * np.sqrt(-V2 / (2 * V0))
+        omega += 1 / (8 * V0) * ((1 / 4 + L**2) * V2**2 / V0**2 - V3 / (2 * V0))
         return omega
     
     qnms = [wkb_frequencies(n) for n in range(n_max)]
@@ -107,16 +109,17 @@ M, Q, T, mu, F, G = analyze_stability(bh, r_max)
 qnms = compute_qnms(bh, r_max, l=2, n_max=5)
 
 # Plot results
+r, solution = bh.solve(r_max)
 plt.figure(figsize=(12, 8))
 plt.subplot(221)
-plt.plot(bh.r, bh.solution[:, 0], label='f(r)')
-plt.plot(bh.r, np.exp(-bh.solution[:, 1]), label='e^(-χ(r))')
+plt.plot(r, solution[:, 0], label='f(r)')
+plt.plot(r, np.exp(-solution[:, 1]), label='e^(-χ(r))')
 plt.legend()
 plt.title('Metric functions')
 
 plt.subplot(222)
-plt.plot(bh.r, bh.solution[:, 2], label='φ(r)')
-plt.plot(bh.r, bh.solution[:, 3], label='ψ(r)')
+plt.plot(r, solution[:, 2], label='φ(r)')
+plt.plot(r, solution[:, 3], label='ψ(r)')
 plt.legend()
 plt.title('Matter fields')
 
